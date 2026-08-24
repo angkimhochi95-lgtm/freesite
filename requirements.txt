@@ -1,9 +1,8 @@
 streamlit
+google-generativeai
 yt-dlp
 moviepy
-faster-whisper
-google-generativeai
-pillow
-numpy
 openai-whisper
 imageio-ffmpeg
+opencv-python-headless
+pillow
