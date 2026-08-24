@@ -1,11 +1,15 @@
+# -*- coding: utf-8 -*-
 # modules/renderer.py
 import os
 import re
 import cv2
+import html
+import time
+import uuid
 import numpy as np
 from PIL import Image, ImageDraw
 import config
-from modules.comment_engine import get_system_font, render_crisp_comment_card
+from modules.comment_engine import get_system_font, render_crisp_comment_card, clean_comment_text
 from modules.ocr_detector import is_subtitle_overlapping
 
 try:
@@ -40,19 +44,18 @@ def safe_resize(clip, size):
 
 def wrap_text(text, font, max_width, draw):
     lines = []
-    words = text.split(" ")
-    curr_line = ""
-    for w in words:
-        test_line = curr_line + (" " if curr_line else "") + w
-        bbox = draw.textbbox((0, 0), test_line, font=font)
+    curr = ""
+    for char in text:
+        test = curr + char
+        bbox = draw.textbbox((0, 0), test, font=font)
         if (bbox[2] - bbox[0]) <= max_width:
-            curr_line = test_line
+            curr = test
         else:
-            if curr_line:
-                lines.append(curr_line)
-            curr_line = w
-    if curr_line:
-        lines.append(curr_line)
+            if curr:
+                lines.append(curr)
+            curr = char
+    if curr:
+        lines.append(curr)
     return lines
 
 def auto_detect_video_boundary(clip, duration, *args, **kwargs):
@@ -78,14 +81,30 @@ def auto_detect_video_boundary(clip, duration, *args, **kwargs):
         final_bottom = max(1250, min(1650, int(np.median(bottom_candidates))))
         return final_top, final_bottom
     except Exception:
-        return 480, 1440
+        return 656, 1264
 
-def generate_layout_preview_image(video_path, is_vertical=False, v_top=656, v_bottom=1264, zoom_factor=1.0, sample_time=10.0, out_path="layout_preview.png", *args, **kwargs):
+def generate_layout_preview_image(
+    video_path,
+    is_vertical=False,
+    v_top=656,
+    v_bottom=1264,
+    zoom_factor=1.0,
+    sample_time=2.0,
+    title="레퍼런스 스타일 후킹 타이틀",
+    comment_text="",
+    comment_likes="316",
+    sub_text="",
+    source="",
+    is_white=False,
+    out_path="layout_preview.png",
+    *args,
+    **kwargs
+):
     if not os.path.exists(video_path):
         return None
     try:
         clip = VideoFileClip(video_path)
-        actual_t = min(sample_time, max(0.5, clip.duration - 1.0))
+        actual_t = min(sample_time, max(0.2, clip.duration - 0.5))
         frame = clip.get_frame(actual_t)
         clip.close()
 
@@ -94,6 +113,11 @@ def generate_layout_preview_image(video_path, is_vertical=False, v_top=656, v_bo
         canvas = Image.new("RGBA", (1080, 1920), (14, 14, 16, 255))
         draw = ImageDraw.Draw(canvas)
 
+        mask_bg = (248, 248, 250, 255) if is_white else (14, 14, 16, 255)
+        text_fill = (20, 20, 20, 255) if is_white else (255, 255, 255, 255)
+        outline_c = (255, 255, 255, 255) if is_white else (0, 0, 0, 255)
+
+        # 1. 비디오 프레임 배치
         if not is_vertical:
             scaled_w = int(1080 * float(zoom_factor))
             scaled_h = int(frame_h * (1080 / frame_w) * float(zoom_factor))
@@ -103,32 +127,85 @@ def generate_layout_preview_image(video_path, is_vertical=False, v_top=656, v_bo
             cropped_frame = resized_frame.crop((crop_x, 0, crop_x + 1080, scaled_h))
             y_offset = max(0, (1920 - scaled_h) // 2)
             canvas.paste(cropped_frame, (0, y_offset))
-
-            draw.rectangle([0, 0, 1080, v_top], fill=(14, 14, 16, 245))
-            font_title = get_system_font(42, bold=True)
-            draw.text((60, v_top // 2 - 25), "🔥 [상단 가림막] 초대형 후킹 타이틀", fill=(255, 220, 40, 255), font=font_title)
-            draw.line([(0, v_top), (1080, v_top)], fill=(0, 255, 150, 255), width=4)
-
-            sub_y = v_bottom - 95
-            draw.rounded_rectangle([120, sub_y, 960, sub_y + 60], radius=14, fill=(0, 0, 0, 190))
-            font_sub = get_system_font(30, bold=True)
-            draw.text((150, sub_y + 12), "💬 [OCR 연동] 기존 자막 피해서 펀치라인 출력", fill=(255, 235, 40, 255), font=font_sub)
-
-            draw.rectangle([0, v_bottom, 1080, 1920], fill=(14, 14, 16, 245))
-            draw.line([(0, v_bottom), (1080, v_bottom)], fill=(0, 255, 150, 255), width=4)
-            
-            bottom_h = 1920 - v_bottom
-            card_prev_y = v_bottom + max(15, (bottom_h - 190) // 2)
-            draw.rounded_rectangle([120, card_prev_y, 960, card_prev_y + 190], radius=18, fill=(28, 28, 32, 240), outline=(255, 255, 255, 40), width=2)
-            font_cmt = get_system_font(28, bold=True)
-            draw.text((160, card_prev_y + 75), "💬 [하단 가림막] 유튜브 베스트 댓글", fill=(240, 240, 240, 255), font=font_cmt)
         else:
             resized_frame = raw_img.resize((1080, 1920))
             canvas.paste(resized_frame, (0, 0))
-            draw.rectangle([0, 0, 1080, v_top], fill=(14, 14, 16, 230))
-            draw.rectangle([0, v_bottom, 1080, 1920], fill=(14, 14, 16, 230))
 
-        img_disp = canvas.resize((360, 640))
+        # 2. 상단 가림막 및 타이틀
+        clean_title = html.unescape(title) if title else ""
+        draw.rectangle([0, 0, 1080, v_top], fill=mask_bg)
+        if clean_title:
+            font_title = get_system_font(72, bold=True)
+            lines_title = wrap_text(clean_title, font_title, 960, draw)
+            line_h = 84
+            total_h = len(lines_title) * line_h
+            start_y = max(30, (v_top - total_h) // 2 - 10)
+
+            for line in lines_title:
+                txt_w = draw.textbbox((0, 0), line, font=font_title)[2]
+                tx = (1080 - txt_w) // 2
+                for ox in range(-3, 4):
+                    for oy in range(-3, 4):
+                        if ox*ox + oy*oy <= 9:
+                            draw.text((tx + ox, start_y + oy), line, fill=outline_c, font=font_title)
+                draw.text((tx, start_y), line, fill=text_fill, font=font_title)
+                start_y += line_h
+
+        # 3. 하단 가림막
+        draw.rectangle([0, v_bottom, 1080, 1920], fill=mask_bg)
+
+        # 4. 자막 (입력창이 비어있으면 전혀 출력하지 않음)
+        sub_bottom_y = v_bottom + 14
+        if sub_text is not None and sub_text.strip():
+            clean_sub = html.unescape(sub_text.strip().splitlines()[0])
+            font_sub = get_system_font(42, bold=True)
+            lines_sub = wrap_text(clean_sub, font_sub, 960, draw)
+            
+            curr_sy = v_bottom + 14
+            for ln in lines_sub:
+                txt_w = draw.textbbox((0, 0), ln, font=font_sub)[2]
+                sx = (1080 - txt_w) // 2
+                draw.rounded_rectangle([sx - 16, curr_sy - 6, sx + txt_w + 16, curr_sy + 46], radius=10, fill=(0, 0, 0, 200))
+                for ox in range(-3, 4):
+                    for oy in range(-3, 4):
+                        if ox*ox + oy*oy <= 9:
+                            draw.text((sx + ox, curr_sy + oy), ln, fill=(0, 0, 0, 255), font=font_sub)
+                draw.text((sx, curr_sy), ln, fill=(255, 230, 0, 255), font=font_sub)
+                curr_sy += 52
+            sub_bottom_y = curr_sy + 6
+
+        # 5. 댓글 카드
+        preview_cmt_txt = comment_text.strip().splitlines()[0] if comment_text and comment_text.strip() else "올해 이게 젤웃겼닼ㅋㅋㅋㅋㅋㅋ"
+        card_tmp = f"preview_card_{int(time.time()*1000)}.png"
+        render_crisp_comment_card(
+            author="익명",
+            text=preview_cmt_txt,
+            likes=comment_likes,
+            is_white=is_white,
+            out_path=card_tmp
+        )
+        safe_comment_y = max(sub_bottom_y, v_bottom + 95)
+        safe_comment_y = min(1920 - 190, safe_comment_y)
+
+        if os.path.exists(card_tmp):
+            c_img = Image.open(card_tmp).convert("RGBA")
+            canvas.paste(c_img, (0, safe_comment_y), c_img)
+            try:
+                c_img.close()
+                os.remove(card_tmp)
+            except Exception:
+                pass
+
+        # 6. 출처 표기 (비어있으면 완전 삭제)
+        clean_src = html.unescape(source).strip() if source else ""
+        clean_src = re.sub(r'^출처\s*:\s*', '', clean_src).strip()
+        if clean_src:
+            font_source = get_system_font(21, bold=False)
+            src_color = (130, 130, 135, 255) if is_white else (160, 160, 165, 255)
+            source_y = min(1920 - 32, safe_comment_y + 140)
+            draw.text((70, source_y), f"출처: {clean_src}", fill=src_color, font=font_source)
+
+        img_disp = canvas.resize((432, 768), Image.Resampling.LANCZOS)
         img_disp.save(out_path)
         return out_path
     except Exception:
@@ -137,7 +214,7 @@ def generate_layout_preview_image(video_path, is_vertical=False, v_top=656, v_bo
 def create_base_overlay(title: str, source: str, is_white: bool, is_vertical: bool, v_top: int, v_bottom: int, out_path: str = "base_banner.png", *args, **kwargs):
     w, h = config.SHORTS_WIDTH, config.SHORTS_HEIGHT
     mask_bg = (248, 248, 250, 255) if is_white else (14, 14, 16, 255)
-    highlight_color = (220, 38, 38, 255) if is_white else (255, 220, 40, 255)
+    highlight_color = (20, 20, 20, 255) if is_white else (255, 255, 255, 255)
     outline_c = (255, 255, 255, 255) if is_white else (0, 0, 0, 255)
 
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
@@ -146,28 +223,57 @@ def create_base_overlay(title: str, source: str, is_white: bool, is_vertical: bo
     draw.rectangle([0, 0, w, v_top], fill=mask_bg)
     draw.rectangle([0, v_bottom, w, h], fill=mask_bg)
 
-    font_title = get_system_font(74, bold=True)
-    lines = wrap_text(title, font_title, 960, draw)
-    line_h = 86
-    total_h = len(lines) * line_h
-    start_y = max(35, (v_top - total_h) // 2 - 15)
+    clean_title = html.unescape(title) if title else ""
+    if clean_title:
+        font_title = get_system_font(72, bold=True)
+        lines = wrap_text(clean_title, font_title, 960, draw)
+        line_h = 84
+        total_h = len(lines) * line_h
+        start_y = max(30, (v_top - total_h) // 2 - 10)
 
-    for line in lines:
-        txt_w = draw.textbbox((0, 0), line, font=font_title)[2]
-        tx = (w - txt_w) // 2
-        for ox in range(-3, 4):
-            for oy in range(-3, 4):
-                if ox*ox + oy*oy <= 9:
-                    draw.text((tx + ox, start_y + oy), line, fill=outline_c, font=font_title)
-        draw.text((tx, start_y), line, fill=highlight_color, font=font_title)
-        start_y += line_h
+        for line in lines:
+            txt_w = draw.textbbox((0, 0), line, font=font_title)[2]
+            tx = (w - txt_w) // 2
+            for ox in range(-3, 4):
+                for oy in range(-3, 4):
+                    if ox*ox + oy*oy <= 9:
+                        draw.text((tx + ox, start_y + oy), line, fill=outline_c, font=font_title)
+            draw.text((tx, start_y), line, fill=highlight_color, font=font_title)
+            start_y += line_h
 
-    if source and source.strip():
-        font_src = get_system_font(24, bold=True)
-        draw.text((60, v_top - 42), f"출처: {source.strip()}", fill=(150, 150, 150, 255), font=font_src)
+    # 출처가 있으면 출력, 빈칸이면 아예 안 그림
+    clean_src = html.unescape(source).strip() if source else ""
+    clean_src = re.sub(r'^출처\s*:\s*', '', clean_src).strip()
+    if clean_src:
+        font_source = get_system_font(21, bold=False)
+        src_color = (130, 130, 135, 255) if is_white else (160, 160, 165, 255)
+        draw.text((70, h - 35), f"출처: {clean_src}", fill=src_color, font=font_source)
 
     img.save(out_path)
     return out_path
+
+def find_best_matching_chunk(line_text, chunks):
+    clean_line = re.sub(r'[^가-힣a-zA-Z0-9]', '', html.unescape(line_text))
+    if not clean_line or not chunks:
+        return None
+
+    best_chunk = None
+    max_overlap = 0
+
+    for chk in chunks:
+        chk_txt = re.sub(r'[^가-힣a-zA-Z0-9]', '', html.unescape(chk.get("text", "")))
+        if not chk_txt:
+            continue
+        
+        if clean_line in chk_txt or chk_txt in clean_line:
+            return chk
+        
+        overlap = sum(1 for c in clean_line if c in chk_txt)
+        if overlap > max_overlap and overlap >= 2:
+            max_overlap = overlap
+            best_chunk = chk
+
+    return best_chunk
 
 def render_final_shorts_video(
     source_video_path: str,
@@ -184,9 +290,13 @@ def render_final_shorts_video(
     v_bottom: int = 1264,
     zoom_factor: float = 1.0,
     custom_sub_text: str = None,
+    custom_title: str = None,
+    custom_comment_text: str = None,
+    custom_comment_likes: str = None,
     *args,
     **kwargs
 ):
+    os.makedirs(out_dir, exist_ok=True)
     raw_video = VideoFileClip(source_video_path)
     is_white = "화이트" in template_name
     
@@ -195,11 +305,11 @@ def render_final_shorts_video(
     segment_mappings = []
 
     for seg in segments_plan:
-        st_t = seg["source_start"]
-        en_t = seg["source_end"]
+        st_t = float(seg["source_start"])
+        en_t = float(seg["source_end"])
         sub_clip = safe_subclip(raw_video, st_t, en_t)
         try:
-            sub_clip = sub_clip.audio_fadein(0.05).audio_fadeout(0.05)
+            sub_clip = sub_clip.audio_fadein(0.03).audio_fadeout(0.03)
         except Exception:
             pass
         video_clips.append(sub_clip)
@@ -228,10 +338,14 @@ def render_final_shorts_video(
     else:
         positioned_video = safe_set_pos(safe_resize(assembled_video, (1080, 1920)), (0, 0))
 
-    base_bg_path = os.path.join(out_dir, f"base_bg_{index}.png")
+    raw_title = custom_title if custom_title is not None else clip_info.get("title", "")
+    final_title = html.unescape(raw_title)
+    final_src = real_source if real_source is not None else clip_info.get("source", "")
+    
+    base_bg_path = os.path.join(out_dir, f"base_bg_{index}_{int(time.time()*1000)}.png")
     create_base_overlay(
-        title=clip_info.get("title", "하이라이트"),
-        source=real_source,
+        title=final_title,
+        source=final_src,
         is_white=is_white,
         is_vertical=is_vertical,
         v_top=v_top,
@@ -241,130 +355,157 @@ def render_final_shorts_video(
     bg_clip = safe_set_dur(safe_set_pos(ImageClip(base_bg_path), (0, 0)), total_dur)
     layers = [positioned_video, bg_clip]
 
-    # 1. 실제 유튜브 베스트 댓글 카드 (하단 가림막 영역 정중앙 단독 배치)
-    matched_comment = clip_info.get("matched_comment", {})
-    special_event = clip_info.get("special_event", {})
-    if config.ENABLE_COMMENTS and matched_comment:
-        event_src_end = float(special_event.get("event_end", clip_info.get("climax_end", 0.0)))
-        target_comment_time = None
-        for src_s, src_e, tgt_s, tgt_e in segment_mappings:
-            if src_s <= event_src_end <= src_e:
-                offset = event_src_end - src_s
-                target_comment_time = tgt_s + offset + config.COMMENT_DELAY_AFTER_EVENT
-                break
-                
-        if target_comment_time is None or target_comment_time >= total_dur:
-            target_comment_time = 0.5
+    # 3~4초 간격 릴레이 댓글 리스트 구성
+    comments_to_render = []
 
-        raw_card_file = os.path.join(out_dir, f"raw_card_{index}.png")
-        render_crisp_comment_card(
-            author=matched_comment.get("author", "베플러"),
-            text=matched_comment.get("text", "대박 ㅋㅋㅋ"),
-            likes=str(matched_comment.get("likes", "1.2만")),
-            is_white=is_white,
-            out_path=raw_card_file
-        )
-        
-        card_img = Image.open(raw_card_file).convert("RGBA")
-        full_comment_canvas = Image.new("RGBA", (1080, 1920), (0, 0, 0, 0))
-        
-        bottom_area_h = 1920 - v_bottom
-        safe_comment_y = v_bottom + max(15, (bottom_area_h - 190) // 2)
-        safe_comment_y = min(1920 - 200, safe_comment_y)
-        
-        full_comment_canvas.paste(card_img, (120, safe_comment_y), card_img)
-        
-        c_full_file = os.path.join(out_dir, f"comment_full_{index}.png")
-        full_comment_canvas.save(c_full_file)
-        
-        c_dur = min(config.COMMENT_MAX_DURATION, total_dur - target_comment_time)
-        c_clip = safe_set_dur(safe_set_start(safe_set_pos(ImageClip(c_full_file), (0, 0)), target_comment_time), c_dur)
-        layers.append(c_clip)
-
-    # 2. 핵심 펀치라인 자막 (OCR 연동: 기존 자막과 겹치면 자동 스킵)
-    font_sub = get_system_font(46, bold=True)
-    key_subs = clip_info.get("key_subtitles", [])
-
-    if custom_sub_text and custom_sub_text.strip():
-        lines_custom = [l.strip() for l in custom_sub_text.strip().splitlines() if l.strip()]
-        if lines_custom:
-            dur_per_line = max(1.8, total_dur / len(lines_custom))
-            for l_idx, txt in enumerate(lines_custom):
-                mapped_start = l_idx * dur_per_line
-                if mapped_start >= total_dur:
+    if custom_comment_text and custom_comment_text.strip():
+        user_cmt_lines = [l.strip() for l in custom_comment_text.strip().splitlines() if l.strip()]
+        if user_cmt_lines:
+            step_dur = max(2.8, total_dur / len(user_cmt_lines))
+            for c_idx, c_line in enumerate(user_cmt_lines):
+                c_start_t = c_idx * step_dur
+                if c_start_t >= total_dur:
                     break
-                dur = min(dur_per_line, total_dur - mapped_start)
-                
-                # 원본 영상 프레임 샘플링 후 OCR로 기존 자막 겹침 검사
-                check_t = min(raw_video.duration - 0.1, segments_plan[0]["source_start"] + mapped_start + 0.3)
-                sample_frame = raw_video.get_frame(check_t)
-                frame_bgr = cv2.cvtColor(sample_frame, cv2.COLOR_RGB2BGR)
-                
-                if is_subtitle_overlapping(txt, frame_bgr):
-                    continue  # 기존 방송/유튜브 자막과 겹치면 우리 자막 스킵!
+                c_dur = min(step_dur, total_dur - c_start_t)
+                likes_val = custom_comment_likes if (custom_comment_likes and c_idx == 0) else str(380 + c_idx * 160)
+                comments_to_render.append({
+                    "start": c_start_t,
+                    "dur": c_dur,
+                    "text": c_line,
+                    "likes": likes_val
+                })
 
-                sub_img = Image.new("RGBA", (1080, 1920), (0, 0, 0, 0))
-                draw_sub = ImageDraw.Draw(sub_img)
-                lines = wrap_text(txt, font_sub, 900, draw_sub)
-                
-                sy = max(v_top + 80, v_bottom - 110 - (len(lines) - 1) * 60)
-                for ln in lines:
-                    txt_w = draw_sub.textbbox((0, 0), ln, font=font_sub)[2]
-                    sx = (1080 - txt_w) // 2
-                    draw_sub.rounded_rectangle([sx - 18, sy - 8, sx + txt_w + 18, sy + 54], radius=12, fill=(0, 0, 0, 185))
-                    for ox in range(-3, 4):
-                        for oy in range(-3, 4):
-                            if ox*ox + oy*oy <= 9:
-                                draw_sub.text((sx + ox, sy + oy), ln, fill=(0, 0, 0, 255), font=font_sub)
-                    draw_sub.text((sx, sy), ln, fill=(255, 235, 40, 255), font=font_sub)
-                    sy += 60
-                    
-                s_file = os.path.join(out_dir, f"sub_c_{index}_{l_idx}.png")
-                sub_img.save(s_file)
-                layers.append(safe_set_dur(safe_set_start(safe_set_pos(ImageClip(s_file), (0, 0)), mapped_start), dur))
+    if not comments_to_render:
+        ai_timeline_cmts = clip_info.get("timeline_comments", [])
+        if ai_timeline_cmts:
+            for c_idx, c_item in enumerate(ai_timeline_cmts):
+                c_start_t = float(c_item.get("offset", c_idx * 3.8))
+                if c_start_t >= total_dur:
+                    break
+                c_dur = float(c_item.get("dur", 3.8))
+                c_dur = min(c_dur, max(1.0, total_dur - c_start_t))
+                comments_to_render.append({
+                    "start": c_start_t,
+                    "dur": c_dur,
+                    "text": c_item.get("text", "올해 이게 젤웃겼닼ㅋㅋㅋㅋㅋㅋ"),
+                    "likes": str(c_item.get("likes", 450 + c_idx * 120))
+                })
 
-    elif key_subs and len(key_subs) > 0:
-        for k_idx, k_sub in enumerate(key_subs):
-            k_st, k_et, k_txt = float(k_sub.get("start", 0)), float(k_sub.get("end", 0)), k_sub.get("text", "").strip()
-            if not k_txt:
-                continue
-                
-            for src_s, src_e, tgt_s, tgt_e in segment_mappings:
-                if not (k_et <= src_s or k_st >= src_e):
-                    rel_s = max(0.0, k_st - src_s)
-                    dur = min(k_et, src_e) - max(k_st, src_s)
-                    if dur > 0.3:
-                        mapped_start = tgt_s + rel_s
-                        
-                        check_t = min(raw_video.duration - 0.1, k_st + 0.3)
-                        sample_frame = raw_video.get_frame(check_t)
-                        frame_bgr = cv2.cvtColor(sample_frame, cv2.COLOR_RGB2BGR)
-                        
-                        if is_subtitle_overlapping(k_txt, frame_bgr):
-                            continue # 기존 자막과 겹치면 스킵
+    if not comments_to_render:
+        single_cmt = clip_info.get("matched_comment", {})
+        comments_to_render.append({
+            "start": 0.0,
+            "dur": total_dur,
+            "text": single_cmt.get("text", "아 ㅋㅋㅋㅋ 진짜 대박이네"),
+            "likes": str(single_cmt.get("likes", "520"))
+        })
 
-                        sub_img = Image.new("RGBA", (1080, 1920), (0, 0, 0, 0))
-                        draw_sub = ImageDraw.Draw(sub_img)
-                        lines = wrap_text(k_txt, font_sub, 900, draw_sub)
-                        
-                        sy = max(v_top + 80, v_bottom - 110 - (len(lines) - 1) * 60)
-                        for ln in lines:
-                            txt_w = draw_sub.textbbox((0, 0), ln, font=font_sub)[2]
-                            sx = (1080 - txt_w) // 2
-                            draw_sub.rounded_rectangle([sx - 18, sy - 8, sx + txt_w + 18, sy + 54], radius=12, fill=(0, 0, 0, 185))
-                            for ox in range(-3, 4):
-                                for oy in range(-3, 4):
-                                    if ox*ox + oy*oy <= 9:
-                                        draw_sub.text((sx + ox, sy + oy), ln, fill=(0, 0, 0, 255), font=font_sub)
-                            draw_sub.text((sx, sy), ln, fill=(255, 235, 40, 255), font=font_sub)
-                            sy += 60
-                            
-                        s_file = os.path.join(out_dir, f"sub_k_{index}_{k_idx}.png")
-                        sub_img.save(s_file)
-                        layers.append(safe_set_dur(safe_set_start(safe_set_pos(ImageClip(s_file), (0, 0)), mapped_start), dur))
+    if config.ENABLE_COMMENTS:
+        safe_comment_y = min(1920 - 190, v_bottom + 95)
+        for c_idx, c_data in enumerate(comments_to_render):
+            c_txt = clean_comment_text(c_data["text"])
+            c_file = os.path.join(out_dir, f"card_{index}_{c_idx}_{int(time.time()*1000)}.png")
+            
+            render_crisp_comment_card(
+                author="익명",
+                text=c_txt,
+                likes=str(c_data["likes"]),
+                is_white=is_white,
+                out_path=c_file
+            )
+
+            c_clip = safe_set_dur(safe_set_start(safe_set_pos(ImageClip(c_file), (0, safe_comment_y)), c_data["start"]), c_data["dur"])
+            layers.append(c_clip)
+
+    # 자막 렌더링 (자막 입력창이 비어있으면 100% 미출력)
+    font_sub = get_system_font(42, bold=True)
+    synced_subs_to_render = []
+
+    if custom_sub_text is not None and custom_sub_text.strip():
+        lines_custom = [html.unescape(l.strip()) for l in custom_sub_text.strip().splitlines() if l.strip()]
+        for line in lines_custom:
+            matched_chk = find_best_matching_chunk(line, subtitle_chunks)
+            if matched_chk:
+                c_st = float(matched_chk.get("start", 0))
+                c_et = float(matched_chk.get("end", c_st + 2.0))
+                for src_s, src_e, tgt_s, tgt_e in segment_mappings:
+                    if max(c_st, src_s) < min(c_et, src_e):
+                        rel_s = max(0.0, c_st - src_s)
+                        dur = min(c_et, src_e) - max(c_st, src_s)
+                        if dur >= 0.3:
+                            synced_subs_to_render.append({
+                                "start": tgt_s + rel_s,
+                                "dur": max(1.0, dur),
+                                "text": line,
+                                "orig_time": max(src_s, c_st)
+                            })
+                            break
+            else:
+                key_subs = clip_info.get("key_subtitles", [])
+                matched_key = find_best_matching_chunk(line, key_subs)
+                if matched_key:
+                    k_st = float(matched_key.get("start", 0))
+                    k_et = float(matched_key.get("end", k_st + 2.0))
+                    for src_s, src_e, tgt_s, tgt_e in segment_mappings:
+                        if max(k_st, src_s) < min(k_et, src_e):
+                            rel_s = max(0.0, k_st - src_s)
+                            dur = min(k_et, src_e) - max(k_st, src_s)
+                            synced_subs_to_render.append({
+                                "start": tgt_s + rel_s,
+                                "dur": max(1.0, dur),
+                                "text": line,
+                                "orig_time": max(src_s, k_st)
+                            })
+                            break
+                else:
+                    # 매칭 안 된 경우 전체 구간에 분할 타이밍 배정
+                    synced_subs_to_render.append({
+                        "start": 0.5,
+                        "dur": max(1.5, total_dur - 1.0),
+                        "text": line,
+                        "orig_time": 0.0
+                    })
+
+    for s_idx, sub_item in enumerate(synced_subs_to_render):
+        txt = sub_item["text"]
+        m_start = sub_item["start"]
+        dur = sub_item["dur"]
+
+        if m_start >= total_dur - 0.25:
+            continue
+        clamped_dur = min(dur, max(0.2, total_dur - m_start - 0.25))
+
+        check_t = min(raw_video.duration - 0.1, sub_item["orig_time"] + 0.2)
+        sample_frame = raw_video.get_frame(check_t)
+        frame_bgr = cv2.cvtColor(sample_frame, cv2.COLOR_RGB2BGR)
+
+        if is_subtitle_overlapping(txt, frame_bgr):
+            continue
+
+        sub_img = Image.new("RGBA", (1080, 1920), (0, 0, 0, 0))
+        draw_sub = ImageDraw.Draw(sub_img)
+        lines = wrap_text(txt, font_sub, 960, draw_sub)
+
+        curr_sy = v_bottom + 14
+        for ln in lines:
+            txt_w = draw_sub.textbbox((0, 0), ln, font=font_sub)[2]
+            sx = (1080 - txt_w) // 2
+            draw_sub.rounded_rectangle([sx - 16, curr_sy - 6, sx + txt_w + 16, curr_sy + 46], radius=10, fill=(0, 0, 0, 200))
+            for ox in range(-3, 4):
+                for oy in range(-3, 4):
+                    if ox*ox + oy*oy <= 9:
+                        draw_sub.text((sx + ox, curr_sy + oy), ln, fill=(0, 0, 0, 255), font=font_sub)
+            draw_sub.text((sx, curr_sy), ln, fill=(255, 230, 0, 255), font=font_sub)
+            curr_sy += 52
+
+        s_file = os.path.join(out_dir, f"sub_sync_{index}_{s_idx}_{int(time.time()*1000)}.png")
+        sub_img.save(s_file)
+        layers.append(safe_set_dur(safe_set_start(safe_set_pos(ImageClip(s_file), (0, 0)), m_start), clamped_dur))
 
     final_comp = CompositeVideoClip(layers, size=(1080, 1920))
     final_output_path = os.path.join(out_dir, f"shorts_master_{index}.mp4")
+
+    unique_temp_audio = os.path.join(out_dir, f"temp_audio_{index}_{uuid.uuid4().hex[:8]}.m4a")
 
     if "NVIDIA" in accel_engine:
         codec = "h264_nvenc"
@@ -384,6 +525,8 @@ def render_final_shorts_video(
             final_output_path,
             codec=codec,
             audio_codec="aac",
+            temp_audiofile=unique_temp_audio,
+            remove_temp=True,
             fps=config.TARGET_FPS,
             threads=4,
             ffmpeg_params=ffmpeg_params
@@ -393,10 +536,20 @@ def render_final_shorts_video(
             final_output_path,
             codec="libx264",
             audio_codec="aac",
+            temp_audiofile=unique_temp_audio,
+            remove_temp=True,
             fps=config.TARGET_FPS,
             threads=4,
             preset="ultrafast"
         )
+    finally:
+        try:
+            final_comp.close()
+            assembled_video.close()
+            for c in video_clips:
+                c.close()
+            raw_video.close()
+        except Exception:
+            pass
 
-    raw_video.close()
     return final_output_path

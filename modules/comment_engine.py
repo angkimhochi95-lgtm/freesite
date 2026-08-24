@@ -1,73 +1,112 @@
+# -*- coding: utf-8 -*-
 # modules/comment_engine.py
 import os
+import re
+import html
+import random
 from PIL import Image, ImageDraw, ImageFont
+
+DEFAULT_MOCK_COMMENTS = [
+    {"text": "올해 이게 젤웃겼닼ㅋㅋㅋㅋㅋㅋ", "likes": "316"},
+    {"text": "아 ㅋㅋㅋㅋㅋ 진짜 빵터졌네 레전드다", "likes": "542"},
+    {"text": "이건 볼 때마다 감탄만 나옴 ㅋㅋㅋ", "likes": "820"},
+    {"text": "선배들 리액션이 진짜 찐이다 ㅋㅋㅋ", "likes": "1.2천"},
+    {"text": "오늘 하루 피로가 싹 풀리네 ㅋㅋㅋ 대박", "likes": "394"},
+    {"text": "논리가 완벽하네 ㅋㅋㅋ 몰입감 미쳤다", "likes": "912"},
+    {"text": "알고리즘이 진짜 일 잘했다 ㅋㅋㅋ", "likes": "430"},
+    {"text": "이 조합은 언제 봐도 치트키네 ㅋㅋㅋ", "likes": "675"},
+    {"text": "표정 연기 미쳤나 봐 ㅋㅋㅋㅋㅋ", "likes": "281"},
+    {"text": "진짜 숨도 안 쉬고 웃었넼ㅋㅋㅋ", "likes": "1.5천"}
+]
+
+def clean_comment_text(text: str) -> str:
+    """HTML 특수문자 및 타임스탬프 제거"""
+    if not text:
+        return ""
+    decoded = html.unescape(text)
+    cleaned = re.sub(r'^\s*\[?\d{1,2}:\d{2}\]?\s*', '', decoded)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    return cleaned
 
 def get_system_font(size: int, bold: bool = False):
     candidate_fonts = [
-        "trendy_bold.ttf",
-        "C:/Windows/Fonts/malgunbd.ttf",
-        "C:/Windows/Fonts/malgun.ttf",
-        "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf"
+        "C:\\Windows\\Fonts\\malgunbd.ttf" if bold else "C:\\Windows\\Fonts\\malgun.ttf",
+        "C:\\Windows\\Fonts\\NanumGothicBold.ttf" if bold else "C:\\Windows\\Fonts\\NanumGothic.ttf",
+        "C:\\Windows\\Fonts\\gulim.ttc",
+        "C:\\Windows\\Fonts\\arialbd.ttf" if bold else "C:\\Windows\\Fonts\\arial.ttf",
+        "malgun.ttf",
+        "arial.ttf"
     ]
-    for fp in candidate_fonts:
-        if os.path.exists(fp):
+    for font_path in candidate_fonts:
+        if os.path.exists(font_path):
             try:
-                return ImageFont.truetype(fp, size)
+                return ImageFont.truetype(font_path, size)
             except Exception:
                 continue
     return ImageFont.load_default()
 
-def draw_crisp_heart_icon(draw: ImageDraw.Draw, x: int, y: int, size: int = 24, fill_color=(220, 38, 38, 255)):
-    scale = size / 24.0
-    points = [
-        (x + 12 * scale, y + 21 * scale),
-        (x + 3 * scale, y + 12 * scale),
-        (x + 3 * scale, y + 6 * scale),
-        (x + 8 * scale, y + 2 * scale),
-        (x + 12 * scale, y + 6 * scale),
-        (x + 16 * scale, y + 2 * scale),
-        (x + 21 * scale, y + 6 * scale),
-        (x + 21 * scale, y + 12 * scale)
-    ]
-    draw.polygon(points, fill=fill_color)
-    draw.ellipse([x + 3*scale, y + 2*scale, x + 12*scale, y + 11*scale], fill=fill_color)
-    draw.ellipse([x + 12*scale, y + 2*scale, x + 21*scale, y + 11*scale], fill=fill_color)
+def wrap_comment_text(text: str, font: ImageFont.ImageFont, max_width: int, draw: ImageDraw.ImageDraw):
+    lines = []
+    curr = ""
+    for char in text:
+        test = curr + char
+        bbox = draw.textbbox((0, 0), test, font=font)
+        if (bbox[2] - bbox[0]) <= max_width:
+            curr = test
+        else:
+            if curr:
+                lines.append(curr)
+            curr = char
+    if curr:
+        lines.append(curr)
+    return lines[:2]
 
-def draw_crisp_comment_bubble(draw: ImageDraw.Draw, x: int, y: int, size: int = 22, fill_color=(160, 160, 160, 255)):
-    scale = size / 22.0
-    draw.rounded_rectangle([x, y, x + 20 * scale, y + 15 * scale], radius=int(4 * scale), fill=fill_color)
-    tail = [(x + 4 * scale, y + 14 * scale), (x + 2 * scale, y + 19 * scale), (x + 9 * scale, y + 14 * scale)]
-    draw.polygon(tail, fill=fill_color)
+def render_crisp_comment_card(
+    author: str = "익명",
+    text: str = "",
+    likes: str = "316",
+    is_white: bool = False,
+    out_path: str = "comment_card.png"
+):
+    """
+    슬림 & 미니멀 모바일 댓글 카드 (작고 세련된 폰트 크기 적용)
+    """
+    clean_txt = clean_comment_text(text)
+    if not clean_txt:
+        mock = random.choice(DEFAULT_MOCK_COMMENTS)
+        clean_txt = mock["text"]
+        likes = mock["likes"]
 
-def render_crisp_comment_card(author: str, text: str, likes: str, is_white: bool = False, out_path: str = "comment_card.png"):
-    card_w = 840
-    card_h = 190
-    bg_color = (255, 255, 255, 245) if is_white else (28, 28, 32, 245)
-    text_color = (20, 20, 20, 255) if is_white else (245, 245, 245, 255)
-    meta_color = (110, 110, 110, 255) if is_white else (160, 160, 160, 255)
-    
+    # 카드 높이를 150px로 슬림하게 축소
+    card_w, card_h = 1080, 150
     img = Image.new("RGBA", (card_w, card_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    draw.rounded_rectangle([0, 0, card_w, card_h], radius=18, fill=bg_color)
-    
-    avatar_colors = [(225, 29, 72), (37, 99, 235), (13, 148, 136), (217, 119, 6)]
-    bg_avatar = avatar_colors[abs(hash(author)) % len(avatar_colors)]
-    draw.ellipse([25, 25, 75, 75], fill=bg_avatar)
-    initial = author[0].upper() if author else "U"
-    draw.text((41, 33), initial, fill=(255, 255, 255, 255), font=get_system_font(26, bold=True))
-    
-    draw.text((90, 25), f"@{author}", fill=meta_color, font=get_system_font(20, bold=True))
-    id_w = draw.textbbox((0, 0), f"@{author}", font=get_system_font(20, bold=True))[2]
-    draw.text((90 + id_w + 12, 27), "· 방금 전", fill=meta_color, font=get_system_font(16))
-    
-    display_text = text if len(text) <= 32 else text[:30] + "..."
-    draw.text((90, 64), display_text, fill=text_color, font=get_system_font(23, bold=True))
-    
-    draw_crisp_heart_icon(draw, x=90, y=130, size=20, fill_color=(225, 29, 72, 255))
-    draw.text((118, 128), str(likes), fill=text_color, font=get_system_font(18, bold=True))
-    
-    draw_crisp_comment_bubble(draw, x=220, y=130, size=19, fill_color=meta_color)
-    draw.text((246, 128), "답글", fill=meta_color, font=get_system_font(16))
-    
+
+    main_text_color = (20, 20, 20, 255) if is_white else (245, 245, 245, 255)
+    meta_color = (110, 110, 115, 255) if is_white else (160, 160, 165, 255)
+    heart_color = (255, 55, 65, 255)
+
+    # 1. 댓글 본문 (26pt 크기로 부담 없이 슬림하게 정렬)
+    start_x = 70
+    font_main = get_system_font(26, bold=True)
+    lines = wrap_comment_text(clean_txt, font_main, 940, draw)
+
+    start_y = 10
+    for ln in lines:
+        draw.text((start_x, start_y), ln, fill=main_text_color, font=font_main)
+        start_y += 36
+
+    # 2. 하단 메타 바 (빨간 하트 ♥ + 좋아요 + 답글)
+    font_meta = get_system_font(20, bold=False)
+    font_bold_meta = get_system_font(20, bold=True)
+    meta_y = max(start_y + 8, 56)
+
+    draw.text((start_x, meta_y - 2), "♥", fill=heart_color, font=font_meta)
+    draw.text((start_x + 28, meta_y), str(likes), fill=meta_color, font=font_bold_meta)
+    likes_w = draw.textbbox((0, 0), str(likes), font=font_bold_meta)[2]
+
+    reply_x = start_x + 28 + likes_w + 28
+    draw.text((reply_x, meta_y), "답글", fill=meta_color, font=font_meta)
+
     img.save(out_path)
     return out_path

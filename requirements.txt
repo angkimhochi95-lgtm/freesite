@@ -5,3 +5,5 @@ faster-whisper
 google-generativeai
 pillow
 numpy
+openai-whisper
+imageio-ffmpeg
