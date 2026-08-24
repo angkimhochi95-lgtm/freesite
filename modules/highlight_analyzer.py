@@ -2,231 +2,256 @@
 # modules/highlight_analyzer.py
 import json
 import re
-import ast
-import html
+import os
 import google.generativeai as genai
 
-def clean_json_text(text: str) -> str:
-    if not text:
-        return ""
-    text = text.strip()
-    text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.MULTILINE)
-    text = re.sub(r'```\s*$', '', text, flags=re.MULTILINE)
-    text = text.strip()
+def clean_and_parse_json(raw_text):
+    """AI 응답 텍스트에서 마크다운 및 제어문자를 정제하고 무결점 JSON으로 파싱합니다."""
+    text = raw_text.strip()
+    if "```json" in text:
+        text = text.split("```json")[1].split("```")[0].strip()
+    elif "```" in text:
+        text = text.split("```")[1].split("```")[0].strip()
+
+    text = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', text)
+
+    try:
+        return json.loads(text)
+    except Exception:
+        match = re.search(r'(\{[\s\S]*\}|\[[\s\S]*\])', text)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except Exception:
+                pass
+    return None
+
+
+def generate_fallback_plan(video_title, channel_name, duration, target_count):
+    """AI 통신 지연 시 작동하는 고품질 폴백 엔진 (숫자 나열 방지)"""
+    clips = []
+    candidates = []
     
-    first_brace = text.find("{")
-    last_brace = text.rfind("}")
-    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-        text = text[first_brace:last_brace + 1]
-    return text
+    # 동적 훅 타이틀 템플릿 풀
+    hook_templates = [
+        "결국 참다못해 제대로 폭발해버린 순간 ㅋㅋㅋ",
+        "갑자기 돌발상황 발생해서 난리 난 현장 분위기",
+        "아무도 예상 못 한 충격적인 전개 ㄷㄷ",
+        "보자마자 빵 터진 역대급 명장면",
+        "이 한마디로 촬영장 초토화된 이유",
+        "진짜 봐도 봐도 레전드인 명대사"
+    ]
+    
+    clean_base_title = re.sub(r'\[.*?\]|\(.*?\)|#\S+', '', video_title).strip()
+    if not clean_base_title:
+        clean_base_title = "화제의 그 장면"
 
-def parse_gemini_json_robust(raw_text: str, duration: float, target_count: int, fallback_source: str, video_title: str):
-    cleaned = clean_json_text(raw_text)
-
-    # 1. 표준 파싱
-    try:
-        parsed = json.loads(cleaned)
-        if isinstance(parsed, dict) and "clips" in parsed and isinstance(parsed["clips"], list):
-            return parsed["clips"], parsed.get("real_source", fallback_source)
-    except Exception:
-        pass
-
-    # 2. ast 파싱
-    try:
-        parsed = ast.literal_eval(cleaned)
-        if isinstance(parsed, dict) and "clips" in parsed and isinstance(parsed["clips"], list):
-            return parsed["clips"], parsed.get("real_source", fallback_source)
-    except Exception:
-        pass
-
-    # 3. 정규식 리페어
-    try:
-        repaired = re.sub(r"(?<=[\{\s,])'([^']+)'(?=\s*:)", r'"\1"', cleaned)
-        repaired = re.sub(r":\s*'([^']*)'", r': "\1"', repaired)
-        repaired = re.sub(r',\s*([\]}])', r'\1', repaired)
-        parsed = json.loads(repaired)
-        if isinstance(parsed, dict) and "clips" in parsed and isinstance(parsed["clips"], list):
-            return parsed["clips"], parsed.get("real_source", fallback_source)
-    except Exception:
-        pass
-
-    # 4. 폴백 생성 (알고리즘 15~22초 루프 최적화)
-    step = max(20.0, (duration - 20.0) / max(1, target_count))
-    fallback_clips = []
+    step = duration / (target_count + 1)
     for i in range(target_count):
-        st_t = round(min(duration - 20.0, 3.0 + i * step), 1)
-        et_t = round(min(duration, st_t + 20.0), 1)
-        fallback_clips.append({
-            "title": f"{video_title[:16]} 빵 터진 순간 #{i+1} ㅋㅋㅋ",
-            "score": 98 - i*2,
-            "recommended_structure": "Infinite_Loop",
-            "ai_note": "1~3초 VVSA 후킹 및 20초 고밀도 무한 루프 최적화 구간",
-            "source": fallback_source,
-            "context_start": st_t,
-            "context_end": et_t,
-            "key_subtitles": [],
-            "loop_hook_hint": "끝 문장이 첫 장면 질문으로 자연스럽게 이어집니다.",
-            "timeline_comments": [
-                {"offset": 0.0, "dur": 4.0, "text": "아니 ㅋㅋㅋ 시작부터 텐션 왜 이랰ㅋㅋㅋ", "likes": "420"},
-                {"offset": 4.0, "dur": 4.0, "text": "표정 보니까 진심 영혼 나갔네 ㅋㅋㅋ", "likes": "680"},
-                {"offset": 8.0, "dur": 4.0, "text": "이걸 여기서 성공하네 ㅋㅋㅋ 운 미쳤다", "likes": "1.2천"}
-            ],
-            "matched_comment": {"author": "익명", "text": "이 구간은 언제 봐도 개웃기넼ㅋㅋㅋ", "likes": f"{480 + i*110}"}
+        base_s = round(i * step + 5.0, 1)
+        s1 = base_s
+        e1 = round(min(duration, s1 + 10.0), 1)
+        s2 = round(min(duration, e1 + 5.0), 1)
+        e2 = round(min(duration, s2 + 18.0), 1)
+        s3 = round(min(duration, e2 + 4.0), 1)
+        e3 = round(min(duration, s3 + 8.0), 1)
+
+        custom_segs = [
+            {"source_start": s1, "source_end": e1},
+            {"source_start": s2, "source_end": e2}
+        ]
+        if e3 > s3 and (e3 - s1) < 58.0:
+            custom_segs.append({"source_start": s3, "source_end": e3})
+
+        chosen_title = hook_templates[i % len(hook_templates)]
+
+        clip_obj = {
+            "id": i + 1,
+            "title": f"{chosen_title}",
+            "source": channel_name,
+            "score": 92 - (i * 2),
+            "loop_hook_hint": "마지막 리액션이 첫 1초 질문으로 자연스럽게 연결되는 무한 루프 구조",
+            "ai_note": "루즈한 설명 구간을 건너뛰고 핵심 리액션 2~3구간을 직결한 점프컷",
+            "context_start": s1,
+            "context_end": custom_segs[-1]["source_end"],
+            "custom_segments": custom_segs,
+            "custom_comments_block": "이 부분 편집 진짜 미쳤넼ㅋㅋㅋㅋ\n알고리즘 타고 성지순례 왔습니다\n이게 여기서 이렇게 이어지네 ㄷㄷ"
+        }
+        clips.append(clip_obj)
+
+    total_cand_count = max(6, target_count * 2)
+    cand_step = duration / (total_cand_count + 1)
+    for j in range(total_cand_count):
+        c_s = round(j * cand_step + 3.0, 1)
+        c_e1 = round(min(duration, c_s + 12.0), 1)
+        c_s2 = round(min(duration, c_e1 + 6.0), 1)
+        c_e2 = round(min(duration, c_s2 + 20.0), 1)
+        
+        m_start = int(c_s // 60)
+        s_start = int(c_s % 60)
+        m_end = int(c_e2 // 60)
+        s_end = int(c_e2 % 60)
+
+        cand_title = hook_templates[j % len(hook_templates)]
+
+        candidates.append({
+            "candidate_id": j + 1,
+            "time_range": f"{m_start:02d}:{s_start:02d} ~ {m_end:02d}:{s_end:02d}",
+            "summary": f"주요 대화 및 사건 발생 구간 ({clean_base_title[:12]})",
+            "title": cand_title,
+            "score": 90 - j,
+            "segments": [
+                {"source_start": c_s, "source_end": c_e1},
+                {"source_start": c_s2, "source_end": c_e2}
+            ]
         })
-    return fallback_clips, fallback_source
 
-def analyze_video_highlights(
-    gemini_api_key: str,
-    video_title: str,
-    transcript_text: str,
-    duration: float,
-    target_count: int = 3,
-    real_comments: list = None,
-    channel_name: str = ""
-):
-    clean_key = gemini_api_key.strip()
-    genai.configure(api_key=clean_key)
+    return clips, candidates
 
-    clean_comments = []
-    mined_timestamps = []
 
-    if real_comments:
-        for c in real_comments:
-            raw_t = html.unescape(c.get("text", "")).strip()
-            ts_matches = re.findall(r'(?:(\d{1,2}):)?(\d{1,2}):(\d{2})', raw_t)
-            for m in ts_matches:
-                sec = (int(m[0])*3600 if m[0] else 0) + int(m[1])*60 + int(m[2])
-                if 0 < sec < duration:
-                    mined_timestamps.append(f"{sec//60:02d}:{sec%60:02d} ({sec}초) -> '{raw_t[:30]}'")
+def analyze_video_highlights(gemini_api_key, video_title, transcript_text, duration, target_count=3, real_comments=None, channel_name=""):
+    """
+    영상 대본의 실제 맥락/사건을 반영하여 강력한 후킹 제목과 2~3구간 점프컷을 추출합니다.
+    """
+    if not gemini_api_key:
+        return generate_fallback_plan(video_title, channel_name, duration, target_count)
 
-            cleaned_t = re.sub(r'^\s*\[?\d{1,2}:\d{2}\]?\s*', '', raw_t).replace('"', '').replace("'", "")
-            if len(cleaned_t) >= 3:
-                clean_comments.append(cleaned_t)
+    try:
+        genai.configure(api_key=gemini_api_key)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+    except Exception:
+        return generate_fallback_plan(video_title, channel_name, duration, target_count)
 
-    comments_sample = "\n".join([f"- {c}" for c in clean_comments[:30]]) if clean_comments else "댓글 데이터 없음"
-    mined_ts_str = "\n".join([f"- {ts}" for ts in mined_timestamps[:10]]) if mined_timestamps else "시청자 타임스탬프 없음"
+    comments_context = ""
+    if real_comments and len(real_comments) > 0:
+        comments_sample = "\n".join([f"- {c.get('text', '')}" for c in real_comments[:30] if c.get('text')])
+        comments_context = f"\n[시청자 실제 반응 및 인기 댓글]\n{comments_sample}\n"
 
-    transcript_body = transcript_text[:14000].strip()
-    if not transcript_body or len(transcript_body) < 20:
-        transcript_body = f"[영상 제목: {video_title}, 대사 적은 실황/상황 영상. 영상 흐름을 토대로 가장 웃기고 터지는 순간을 분석하세요.]"
-
-    window_sec = duration / max(1, target_count)
-    window_guide = [f"- 클립 #{i+1} 추천 범위: {int(i*window_sec)}초 ~ {int((i+1)*window_sec)}초" for i in range(target_count)]
-    window_guide_str = "\n".join(window_guide)
-
-    pure_channel_name = re.sub(r'[\'"]', '', channel_name.strip()) if channel_name and channel_name.strip() else ""
-    safe_title = re.sub(r'[\'"]', '', video_title).strip()
+    transcript_sample = transcript_text[:35000] if len(transcript_text) > 35000 else transcript_text
 
     prompt = f"""
-당신은 유튜브 1000만 조회수를 만드는 숏폼 알고리즘 총괄 디렉터입니다.
-아래 영상 정보와 대본을 분석하여 [알고리즘 3대 핵심 지표]를 100% 충족하는 쇼츠 {target_count}개를 완성하세요.
+    당신은 대한민국 1위 숏폼 바이럴 전문 디렉터입니다.
+    영상 대본(타임스탬프 포함)을 정밀 분석하여, 단일 구간만 뽑지 말고 **지루한 공백/잡담을 건너뛴 2~3개 알짜 점프컷 쇼츠**를 기획하세요.
 
-[영상 정보]
-- 영상 제목: {safe_title}
-- 채널/출처명: {pure_channel_name}
-- 전체 길이: {duration:.1f}초
+    [영상 정보]
+    - 원본 제목: {video_title}
+    - 전체 영상 길이: {duration:.1f}초
+    - 채널명: {channel_name}
+    {comments_context}
 
-[시청자 꿀잼 타임스탬프 (최우선 반영)]:
-{mined_ts_str}
+    [대본 타임라인 데이터]
+    {transcript_sample}
 
-[실제 시청자 반응 댓글]:
-{comments_sample}
+    ================================================================================
+    [🔥 쇼츠 제목(Title) 작명 절대 수칙 - 위반 시 무효]
+    ================================================================================
+    1. **절대 금지 표현**:
+       - '#1', '#2', '1탄', '2탄', '3탄', '파트1', 'Part 1', '하이라이트', '모음집', '핵심요약' 등의 무의미한 숫자 및 형식적 단어는 **절대 작성하지 마세요.**
+       - 원본 영상 제목을 단순히 복사하여 뒤에 숫자만 붙이는 행위는 엄격히 금지합니다.
+    2. **필수 작명 공식**:
+       - 반드시 해당 쇼츠 구간에서 **실제로 일어난 구체적인 사건, 충격적인 발언, 인물의 감정 변화, 반전 리액션**을 담아 15자~25자 사이로 작성하세요.
+       - 시청자가 피드를 넘기다 멈출 수밖에 없는 **클릭 유도형 어그로/호기심 자극 문장**이어야 합니다.
+       - [작명 예시]:
+         * "선 넘는 질문에 멘붕 온 실제 반응 ㅋㅋㅋ"
+         * "통장 잔고 보고 촬영장 뒤집어진 이유 ㄷㄷ"
+         * "결국 참다못해 방송 중에 욕설 튀어나옴"
+         * "이 한마디로 분위기 순식간에 싸해짐"
+         * "아무도 예상 못 한 결말에 다들 기겁함"
 
-[탐색 시간대 가이드]:
-{window_guide_str}
+    ================================================================================
+    [✂️ 2~3구간 스마트 점프컷 규칙]
+    ================================================================================
+    - 1구간(도입부): 시청자 이탈 방어용 핵심 사건/도입 발언 (8~14초)
+    - 2구간(전개/리액션): 1구간과 맥락이 이어지는 사건의 절정 및 반응 (10~18초)
+    - 3구간(결말/반전 - 선택): 펀치라인 및 마무리 (8~15초)
+    - 각 구간 사이의 늘어지는 잡담/오디오 공백은 건너뛰고, 이어붙인 총 재생 시간은 **35초 ~ 55초**로 맞추세요.
+    - custom_comments_block에는 영상 내용과 직결되는 시청자 반응 댓글을 3줄 이상 작성하세요.
 
-[전체 대본 및 내용]:
-{transcript_body}
-
-----------------------------------------------------
-🔥 [알고리즘 3대 핵심 지표 공략 원칙] 🔥
-
-1. 🎯 첫 1~3초 이탈 방어 (VVSA 조회율 70% 이상 목표):
-   - 인트로 인사말("안녕하세요", "오늘은~")을 100% 배제하고, 시작 1초 만에 사건의 핵심 질문이나 충격적인 대사가 터지는 시점을 `context_start`로 설정.
-   - 제목({safe_title})은 '하이라이트' 같은 진부한 단어 없이, 스크롤을 멈추게 만드는 15~20자 후킹형으로 작성.
-
-2. ⏱️ 영상 길이 최적화 (시청 지속 시간 100% 이상 / 재시청 유도):
-   - 각 클립의 총 길이는 무조건 **15초 ~ 24초 내외**로 짧고 밀도 높게 칼컷팅.
-
-3. 🔁 무한 루프(Infinite Loop) 구조 설계:
-   - 영상의 마지막 대사/장면 직후 0.3초 만에 칼종료하여, 시청자가 끝난 줄 모르고 첫 1초 화면으로 자연스럽게 이어지도록 끝 지점(`context_end`) 설정.
-   - `loop_hook_hint`에 영상 마지막 문장과 첫 문장이 어떻게 연결되는지 한 줄 요약 작성.
-
-반드시 유효한 JSON 포맷으로만 응답하세요:
-{{
-  "real_source": "{pure_channel_name}",
-  "clips": [
+    ================================================================================
+    [반드시 순수 JSON 포맷으로만 출력]:
+    ================================================================================
     {{
-      "title": "1~3초 시선 끄는 바이럴 후킹 타이틀 ㅋㅋㅋ",
-      "score": 99,
-      "recommended_structure": "Infinite_Loop",
-      "ai_note": "1~3초 VVSA 이탈 방어 및 100% 완독률 루프 구조 설계",
-      "source": "{pure_channel_name}",
-      "context_start": 12.0,
-      "context_end": 29.5,
-      "loop_hook_hint": "끝 대사가 첫 장면의 질문과 매끄럽게 연결되는 무한 루프",
-      "key_subtitles": [
-        {{"start": 13.0, "end": 16.0, "text": "상황을 여는 첫 번째 핵심 대사"}},
-        {{"start": 24.0, "end": 29.0, "text": "터지는 결정적 펀치라인"}}
+      "all_candidates": [
+        {{
+          "candidate_id": 1,
+          "time_range": "01:20 ~ 02:15",
+          "summary": "핵심 갈등 발생 및 출연진 멘붕 순간",
+          "title": "선 넘는 질문에 멘붕 온 실제 반응 ㅋㅋㅋ",
+          "score": 96,
+          "segments": [
+            {{"source_start": 80.0, "source_end": 92.0, "desc": "도입 사건 발단"}},
+            {{"source_start": 104.0, "source_end": 125.0, "desc": "핵심 반전 및 리액션"}}
+          ]
+        }}
       ],
-      "timeline_comments": [
-        {{"offset": 0.0, "dur": 4.0, "text": "아니 ㅋㅋㅋ 시작부터 텐션 왜 이랰ㅋㅋㅋ", "likes": "420"}},
-        {{"offset": 4.0, "dur": 4.0, "text": "표정 보니까 진심 영혼 나갔네 ㅋㅋㅋ", "likes": "680"}},
-        {{"offset": 8.0, "dur": 4.0, "text": "이걸 여기서 성공하네 ㅋㅋㅋ 운 미쳤다", "likes": "1.2천"}}
+      "selected_shorts": [
+        {{
+          "id": 1,
+          "title": "통장 잔고 보고 촬영장 뒤집어진 이유 ㄷㄷ",
+          "source": "{channel_name}",
+          "score": 98,
+          "loop_hook_hint": "마지막 리액션이 첫 질문으로 이어지는 무한 루프",
+          "ai_note": "지루한 설명 구간 15초를 스킵하고 핵심 순간 2구간을 직결",
+          "context_start": 80.0,
+          "context_end": 125.0,
+          "custom_segments": [
+            {{"source_start": 80.0, "source_end": 92.0}},
+            {{"source_start": 104.0, "source_end": 125.0}}
+          ],
+          "custom_comments_block": "와 여기서 이게 이렇게 터지넼ㅋㅋㅋㅋ\\n진짜 레전드 찍었다\\n알고리즘 타고 성지순례 옴"
+        }}
       ]
     }}
-  ]
-}}
-"""
+    """
 
-    usable_models = []
     try:
-        for m in genai.list_models():
-            if "generateContent" in getattr(m, "supported_generation_methods", []):
-                usable_models.append(m.name)
+        response = model.generate_content(prompt)
+        parsed = clean_and_parse_json(response.text)
+
+        if not parsed or not isinstance(parsed, dict):
+            return generate_fallback_plan(video_title, channel_name, duration, target_count)
+
+        selected_shorts = parsed.get("selected_shorts", [])
+        all_candidates = parsed.get("all_candidates", [])
+
+        if not selected_shorts:
+            return generate_fallback_plan(video_title, channel_name, duration, target_count)
+
+        final_clips = selected_shorts[:target_count]
+
+        # 세그먼트 데이터 및 타이틀 검증/보정
+        for c in final_clips:
+            # 타이틀에서 '#1', '#2', '1탄' 등 잔여 숫자 패턴 필터링
+            raw_t = c.get("title", "")
+            raw_t = re.sub(r'#\d+|\b\d+탄\b|\b파트\s*\d+\b|\bPart\s*\d+\b', '', raw_t).strip()
+            c["title"] = raw_t if raw_t else "화제의 그 명장면 ㅋㅋㅋ"
+
+            segs = c.get("custom_segments", [])
+            if not segs or len(segs) == 0:
+                c_s = float(c.get("context_start", 0.0))
+                c_e = float(c.get("context_end", min(duration, c_s + 40.0)))
+                mid = c_s + (c_e - c_s) / 2
+                c["custom_segments"] = [
+                    {"source_start": round(c_s, 1), "source_end": round(max(c_s + 1.0, mid - 2.0), 1)},
+                    {"source_start": round(min(c_e - 1.0, mid + 2.0), 1), "source_end": round(c_e, 1)}
+                ]
+            else:
+                for s in segs:
+                    s["source_start"] = round(max(0.0, float(s.get("source_start", 0.0))), 1)
+                    s["source_end"] = round(min(duration, float(s.get("source_end", duration))), 1)
+
+            c["context_start"] = float(c["custom_segments"][0]["source_start"])
+            c["context_end"] = float(c["custom_segments"][-1]["source_end"])
+
+        for cand in all_candidates:
+            raw_ct = cand.get("title", "")
+            raw_ct = re.sub(r'#\d+|\b\d+탄\b|\b파트\s*\d+\b|\bPart\s*\d+\b', '', raw_ct).strip()
+            cand["title"] = raw_ct if raw_ct else "놓치면 아쉬운 핵심 장면"
+
+        if not all_candidates:
+            _, all_candidates = generate_fallback_plan(video_title, channel_name, duration, target_count)
+
+        return final_clips, all_candidates
+
     except Exception:
-        pass
-
-    target_models = [m for m in ["models/gemini-1.5-flash", "models/gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.0-flash"] if m in usable_models]
-    if not target_models:
-        target_models = usable_models if usable_models else ["gemini-1.5-flash", "gemini-2.0-flash"]
-
-    response_text = ""
-    for m_name in target_models:
-        try:
-            model = genai.GenerativeModel(m_name, generation_config={"response_mime_type": "application/json"})
-            resp = model.generate_content(prompt)
-            if resp and resp.text:
-                response_text = resp.text.strip()
-                if "{" in response_text and "clips" in response_text:
-                    break
-        except Exception:
-            continue
-
-    raw_clips, real_src = parse_gemini_json_robust(response_text, duration, target_count, pure_channel_name, safe_title)
-
-    valid_clips = []
-    for c in raw_clips:
-        c_st = max(0.0, float(c.get("context_start", 0.0)))
-        c_et = min(duration, float(c.get("context_end", c_st + 20.0)))
-
-        # 알고리즘 지표: 15초 ~ 25초 강제 보정
-        if c_et - c_st < 14.0:
-            c_et = min(duration, c_st + 18.0)
-        elif c_et - c_st > 25.0:
-            c_et = c_st + 23.0
-
-        is_overlap = False
-        for vc in valid_clips:
-            if not (c_et + 10.0 <= vc["context_start"] or c_st >= vc["context_end"] + 10.0):
-                is_overlap = True
-                break
-
-        if not is_overlap:
-            c["context_start"] = round(c_st, 1)
-            c["context_end"] = round(c_et, 1)
-            c["source"] = pure_channel_name
-            valid_clips.append(c)
-
-    valid_clips.sort(key=lambda x: x["context_start"])
-    return valid_clips[:target_count], real_src
+        return generate_fallback_plan(video_title, channel_name, duration, target_count)

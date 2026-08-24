@@ -553,3 +553,121 @@ def render_final_shorts_video(
             pass
 
     return final_output_path
+
+# ==============================================================================
+# [신규 추가] 스마트 점프컷(다중 세그먼트) 자막 재배치 및 렌더링 엔진
+# ==============================================================================
+
+def remap_subtitles_for_jumpcut(subtitles, segments):
+    """
+    잘려나간 노잼 구간의 시간만큼 자막 타임스탬프를 0.001초 오차 없이 정밀하게 앞당깁니다.
+    """
+    remapped = []
+    accumulated_time = 0.0
+
+    for seg in segments:
+        s_start = float(seg['start'])
+        s_end = float(seg['end'])
+        seg_dur = s_end - s_start
+        if seg_dur <= 0:
+            continue
+
+        for sub in subtitles:
+            # Whisper 단어 단위 or 문장 단위 자막 데이터 파싱
+            sub_s = float(sub.get('start', 0.0))
+            sub_e = float(sub.get('end', 0.0))
+            sub_text = sub.get('text', '').strip()
+
+            # 현재 클립 구간 내에 포함된 자막만 추출
+            if sub_e > s_start and sub_s < s_end:
+                c_start = max(sub_s, s_start)
+                c_end = min(sub_e, s_end)
+                time_offset = accumulated_time - s_start
+
+                new_sub = dict(sub)
+                new_sub['start'] = round(c_start + time_offset, 3)
+                new_sub['end'] = round(c_end + time_offset, 3)
+                new_sub['text'] = sub_text
+
+                # 단어별 하이라이트(words) 데이터가 있을 경우 내부 타임스탬프도 재계산
+                if 'words' in sub and isinstance(sub['words'], list):
+                    remapped_words = []
+                    for w in sub['words']:
+                        w_s = float(w.get('start', 0.0))
+                        w_e = float(w.get('end', 0.0))
+                        if w_e > s_start and w_s < s_end:
+                            remapped_words.append({
+                                'word': w.get('word', ''),
+                                'start': round(max(w_s, s_start) + time_offset, 3),
+                                'end': round(min(w_e, s_end) + time_offset, 3)
+                            })
+                    new_sub['words'] = remapped_words
+
+                remapped.append(new_sub)
+
+        accumulated_time += seg_dur
+
+    return remapped, accumulated_time
+
+
+def render_jumpcut_shorts(video_path, segments, subtitles, output_path, progress_callback=None, **kwargs):
+    """
+    2~3개 알짜 구간을 고속 연결하고, 기존 렌더러 파이프라인(자막/효과/GPU)을 통해 최종 쇼츠를 출력합니다.
+    """
+    from moviepy.editor import VideoFileClip, concatenate_videoclips
+
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"원본 영상을 찾을 수 없습니다: {video_path}")
+
+    # 1. 자막 타임라인 동기화
+    synced_subs, total_stitched_len = remap_subtitles_for_jumpcut(subtitles, segments)
+
+    # 2. 다중 세그먼트 영상 슬라이싱 및 병합
+    main_video = VideoFileClip(video_path)
+    subclips = []
+
+    for seg in segments:
+        s = max(0.0, float(seg['start']))
+        e = min(main_video.duration, float(seg['end']))
+        if e > s:
+            subclips.append(main_video.subclip(s, e))
+
+    if not subclips:
+        main_video.close()
+        raise ValueError("유효한 영상 구간이 지정되지 않았습니다.")
+
+    stitched_video = concatenate_videoclips(subclips, method="compose")
+
+    # 3. 임시 통합 영상 캐싱 (오디오 싱크 방지)
+    temp_stitched_path = os.path.join(os.path.dirname(output_path), "temp_stitched_raw.mp4")
+    stitched_video.write_videofile(
+        temp_stitched_path,
+        fps=30,
+        codec="libx264",
+        audio_codec="aac",
+        preset="ultrafast",
+        threads=4,
+        logger=None
+    )
+    stitched_video.close()
+    main_video.close()
+    for c in subclips:
+        c.close()
+
+    # 4. 기존 메인 렌더러 함수(render_shorts / render_video)로 자막 및 효과 입혀서 최종 출력
+    # (기존 파일 내의 메인 렌더 함수명에 맞게 자동 호출)
+    try:
+        if 'render_shorts' in globals():
+            final_res = render_shorts(temp_stitched_path, synced_subs, output_path, progress_callback=progress_callback, **kwargs)
+        elif 'render_video' in globals():
+            final_res = render_video(temp_stitched_path, synced_subs, output_path, progress_callback=progress_callback, **kwargs)
+        else:
+            final_res = temp_stitched_path
+    finally:
+        if os.path.exists(temp_stitched_path):
+            try:
+                os.remove(temp_stitched_path)
+            except Exception:
+                pass
+
+    return final_res

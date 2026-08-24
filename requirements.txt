@@ -1,7 +1,15 @@
 streamlit
+faster-whisper
+easyocr
 google-generativeai
+google-api-python-client
+isodate
+requests
 yt-dlp
 moviepy
-openai-whisper
+torch
+torchvision
+torchaudio
 opencv-python-headless
 pillow
+numpy
