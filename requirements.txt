@@ -1,8 +1,11 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchaudio
+openai-whisper
 streamlit
 google-generativeai
 yt-dlp
 moviepy
-openai-whisper
 imageio-ffmpeg
 opencv-python-headless
 pillow
